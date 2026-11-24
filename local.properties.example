@@ -1,0 +1,3 @@
+# Archivo de ejemplo de configuración local (no incluir credenciales ni secretos reales)
+# Copie esta propiedad en su archivo local.properties con la URL base de su servicio REST (debe terminar en "/")
+api.baseUrl=https://tu-servicio-remoto.ejemplo.com/api/v1/

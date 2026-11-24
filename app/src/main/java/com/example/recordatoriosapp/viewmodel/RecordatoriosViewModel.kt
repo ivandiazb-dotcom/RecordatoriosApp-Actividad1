@@ -1,23 +1,24 @@
 package com.example.recordatoriosapp.viewmodel
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.example.recordatoriosapp.data.RecordatoriosEnMemoriaRepository
+import com.example.recordatoriosapp.data.NetworkMonitor
 import com.example.recordatoriosapp.data.RecordatoriosRepository
+import com.example.recordatoriosapp.data.SyncResult
 import com.example.recordatoriosapp.model.EstadoRecordatorio
 import com.example.recordatoriosapp.model.Prioridad
 import com.example.recordatoriosapp.model.Recordatorio
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-class RecordatoriosViewModel : ViewModel() {
-
-    // Instanciamos el repositorio directamente aquí para evitar el error de inicio
-    private val repository: RecordatoriosRepository = RecordatoriosEnMemoriaRepository()
+class RecordatoriosViewModel(
+    private val repository: RecordatoriosRepository,
+    private val networkMonitor: NetworkMonitor
+) : ViewModel() {
 
     private val _listaUiState = MutableStateFlow<ListaRecordatoriosUiState>(ListaRecordatoriosUiState.Cargando)
     val listaUiState: StateFlow<ListaRecordatoriosUiState> = _listaUiState.asStateFlow()
@@ -25,21 +26,45 @@ class RecordatoriosViewModel : ViewModel() {
     private val _crearUiState = MutableStateFlow(CrearRecordatorioUiState())
     val crearUiState: StateFlow<CrearRecordatorioUiState> = _crearUiState.asStateFlow()
 
+    private val _estadoRed = MutableStateFlow<String?>(null)
+    val estadoRed: StateFlow<String?> = _estadoRed.asStateFlow()
+
     init {
         cargarRecordatorios()
+        observarConectividad()
     }
 
     fun cargarRecordatorios() {
         viewModelScope.launch {
-            _listaUiState.value = ListaRecordatoriosUiState.Cargando
-            delay(1500)
-
             repository.observarRecordatorios().collect { lista ->
                 if (lista.isEmpty()) {
                     _listaUiState.value = ListaRecordatoriosUiState.Vacia
                 } else {
                     _listaUiState.value = ListaRecordatoriosUiState.ConDatos(lista)
                 }
+            }
+        }
+    }
+
+    private fun observarConectividad() {
+        viewModelScope.launch {
+            networkMonitor.observeConnectivity().collect { conectado ->
+                if (conectado) {
+                    sincronizarAhora()
+                } else {
+                    _estadoRed.value = "Sin conexión. Los cambios se guardan localmente."
+                }
+            }
+        }
+    }
+
+    fun sincronizarAhora() {
+        viewModelScope.launch {
+            when (val resultado = repository.sincronizar()) {
+                is SyncResult.Success -> _estadoRed.value = null
+                is SyncResult.Offline -> _estadoRed.value = "Sin conexión. Mostrando datos locales."
+                is SyncResult.RetryableError -> _estadoRed.value = resultado.message
+                is SyncResult.PermanentError -> _estadoRed.value = resultado.message
             }
         }
     }
@@ -78,9 +103,8 @@ class RecordatoriosViewModel : ViewModel() {
 
         viewModelScope.launch {
             _crearUiState.update { it.copy(enviando = true, errorGeneral = null) }
-            delay(1500)
 
-            val prioridadObj = when(estadoActual.prioridad) {
+            val prioridadObj = when (estadoActual.prioridad) {
                 "Alta" -> Prioridad.Alta
                 "Media" -> Prioridad.Media
                 else -> Prioridad.Baja
@@ -96,10 +120,39 @@ class RecordatoriosViewModel : ViewModel() {
             )
 
             try {
+                // 1. Guarda primero en Room como PENDING (funciona offline)
                 repository.guardar(nuevoRecordatorio)
                 _crearUiState.update { it.copy(enviando = false, guardado = true) }
+                // 2. Intenta sincronizar en segundo plano sin bloquear la UI
+                sincronizarAhora()
             } catch (e: Exception) {
                 _crearUiState.update { it.copy(enviando = false, errorGeneral = "Ocurrió un error al guardar") }
+            }
+        }
+    }
+
+    fun alternarCompletado(recordatorio: Recordatorio) {
+        viewModelScope.launch {
+            val nuevoEstadoCompletado = recordatorio.estado !is EstadoRecordatorio.Completado
+            repository.actualizarCompletado(recordatorio.id, nuevoEstadoCompletado)
+            sincronizarAhora()
+        }
+    }
+
+    fun eliminarRecordatorio(recordatorio: Recordatorio) {
+        viewModelScope.launch {
+            repository.eliminar(recordatorio)
+        }
+    }
+
+    companion object {
+        fun provideFactory(
+            repository: RecordatoriosRepository,
+            networkMonitor: NetworkMonitor
+        ): ViewModelProvider.Factory = object : ViewModelProvider.Factory {
+            @Suppress("UNCHECKED_CAST")
+            override fun <T : ViewModel> create(modelClass: Class<T>): T {
+                return RecordatoriosViewModel(repository, networkMonitor) as T
             }
         }
     }
